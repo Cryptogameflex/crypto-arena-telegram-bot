@@ -1,0 +1,14 @@
+# Ignorēt vides mainīgo failu
+.env
+
+# Ignorēt Python kešatmiņas direktorijus
+__pycache__/
+*.pyc
+
+# Ignorēt datubāzes failu
+*.db
+*.db-journal
+
+# Ignorēt virtuālās vides direktoriju
+venv/
+.venv/
