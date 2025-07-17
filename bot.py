@@ -237,7 +237,7 @@ def save_transaction(self, txid: str, user_id: int, amount: float):
     cursor = conn.cursor()
     
     cursor.execute(
-        "INSERT OR IGNORE INTO transactions (txid, user_id, amount) VALUES (?, ?, ?)",
+        "INSERT OR REPLACE INTO transactions (txid, user_id, amount) VALUES (?, ?, ?)",
         (txid, user_id, amount)
     )
     
