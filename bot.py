@@ -51,6 +51,7 @@ class CryptoArenaBot:
         self.app.add_handler(CommandHandler("status", self.status_command))
         self.app.add_handler(CommandHandler("admin", self.admin_command))
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_txid))
+        self.app.add_handler(CommandHandler("sendtx", self.sendtx_command))
         
         logger.info("✅ Visi handleri ir reģistrēti")
 
@@ -143,6 +144,39 @@ Nosūti man TXID pēc maksājuma veikšanas. (Sagaidi kamēr visi bloki ir apsti
                 "• Maksājums nosūtīts uz pareizo adresi\n"
                 "• Sazināties ar atbalstu @arenasupport"
             )
+
+    async def sendtx_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Apstrādā /sendtx komandu ar TXID, izmantojot handle_txid loģiku."""
+        if not context.args:
+            await update.message.reply_text(
+                "Lūdzu, ieraksti TXID:\n`/sendtx <TXID>`",
+                parse_mode='Markdown'
+            )
+            return
+
+        txid = context.args[0].strip()
+        
+        # Pārbauda vai ziņojums ir privātā sarunā
+        if update.message.chat.type != 'private':
+            await update.message.reply_text("Šo komandu var izmantot tikai privātā sarunā ar botu.")
+            return
+
+        # Izveido pagaidu Update objektu, lai atkārtoti izmantotu handle_txid loģiku
+        # Tas nodrošina, ka TXID tiek pārbaudīts caur TronScan API
+        class DummyMessage:
+            def __init__(self, text, chat):
+                self.text = text
+                self.chat = chat
+            
+        class DummyUpdate:
+            def __init__(self, message, effective_user):
+                self.message = message
+                self.effective_user = effective_user
+
+        dummy_message = DummyMessage(txid, update.message.chat)
+        dummy_update = DummyUpdate(dummy_message, update.effective_user)
+
+        await self.handle_txid(dummy_update, context)
 
     async def verify_transaction(self, txid: str, user_id: int) -> bool:
         """Verificē transakciju caur TronScan API"""
