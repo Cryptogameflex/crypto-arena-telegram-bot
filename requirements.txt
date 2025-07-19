@@ -1,4 +1,4 @@
-python-telegram-bot==20.4
+python-telegram-bot>=22.2,<23.0
 aiofiles==24.1.0
 aiogram==3.21.0
 aiohappyeyeballs==2.6.1
