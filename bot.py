@@ -561,7 +561,7 @@ Komandas:
     async def run(self):
         """Palaiž botu"""
         # Sāk abonementu pārbaudītāju
-        # asyncio.create_task(self.subscription_checker()) # Komentēts ārā, kā ieteikts attēlā
+        asyncio.create_task(self.subscription_checker()) # Atkomentēts
         
         # Sāk botu
         await self.app.initialize()
