@@ -1,6 +1,5 @@
 import os
 import asyncio
-import sqlite3
 import logging
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
@@ -9,9 +8,10 @@ import json
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from telegram.error import TelegramError
-from dotenv import load_dotenv # Importējam dotenv
+from dotenv import load_dotenv
+from supabase import create_client, Client # Importējam Supabase
 
-# Ielādējam vides mainīgos no .env faila (tikai lokālai attīstībai)
+# Ielādējam vides mainīgos no .env faila
 load_dotenv()
 
 # Konfigurācija - tagad lasām no vides mainīgajiem
@@ -20,6 +20,8 @@ ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID"))
 GROUP_ID = int(os.getenv("GROUP_ID"))
 TRONSCAN_API_KEY = os.getenv("TRONSCAN_API_KEY")
 WALLET_ADDRESS = os.getenv("WALLET_ADDRESS")
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
 # Pārējā konfigurācija paliek nemainīga
 SUBSCRIPTION_PRICE = 25  # USDT
@@ -35,54 +37,13 @@ logger = logging.getLogger(__name__)
 class CryptoArenaBot:
     def __init__(self):
         # Pārbaudām, vai visi nepieciešamie vides mainīgie ir iestatīti
-        if not all([TELEGRAM_BOT_TOKEN, ADMIN_USER_ID, GROUP_ID, TRONSCAN_API_KEY, WALLET_ADDRESS]):
+        if not all([TELEGRAM_BOT_TOKEN, ADMIN_USER_ID, GROUP_ID, TRONSCAN_API_KEY, WALLET_ADDRESS, SUPABASE_URL, SUPABASE_KEY]):
             logger.error("Trūkst viens vai vairāki nepieciešamie vides mainīgie. Lūdzu, pārbaudiet .env failu vai servera konfigurāciju.")
             raise ValueError("Trūkst vides mainīgie.")
 
         self.app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-        self.init_database()
+        self.supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
         self.setup_handlers()
-
-    def init_database(self):
-        """Inicializē SQLite datubāzi"""
-        conn = sqlite3.connect('subscriptions.db')
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS subscriptions (
-                user_id INTEGER PRIMARY KEY,
-                username TEXT,
-                first_name TEXT,
-                txid TEXT,
-                start_date TEXT,
-                end_date TEXT,
-                is_active INTEGER DEFAULT 1,
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                reminder_sent_12h INTEGER DEFAULT 0
-            )
-        ''')
-        
-        # Pievieno jaunu kolonnu, ja tā neeksistē (lai atjauninātu esošās datubāzes)
-        try:
-            cursor.execute("ALTER TABLE subscriptions ADD COLUMN reminder_sent_12h INTEGER DEFAULT 0")
-            logger.info("Pievienota kolonna 'reminder_sent_12h' tabulai 'subscriptions'.")
-        except sqlite3.OperationalError as e:
-            if "duplicate column name" in str(e):
-                logger.info("Kolonna 'reminder_sent_12h' jau eksistē.")
-            else:
-                logger.error(f"Kļūda pievienojot kolonnu: {e}")
-        
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS transactions (
-                txid TEXT PRIMARY KEY,
-                user_id INTEGER,
-                amount REAL,
-                verified_at TEXT DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        
-        conn.commit()
-        conn.close()
 
     def setup_handlers(self):
         """Uzstāda bot handlerus"""
@@ -141,7 +102,7 @@ Nosūti man TXID pēc maksājuma veikšanas. (Sagaidi kamēr visi bloki ir apsti
             return
         
         # Pārbauda vai TXID jau nav izmantots
-        if self.is_txid_used(txid):
+        if await self.is_txid_used(txid):
             await update.message.reply_text(
                 "❌ Šis TXID jau ir izmantots. Katrs TXID var tikt izmantots tikai vienu reizi."
             )
@@ -158,7 +119,7 @@ Nosūti man TXID pēc maksājuma veikšanas. (Sagaidi kamēr visi bloki ir apsti
             
             if success:
                 # Saglabā abonementu datubāzē
-                self.save_subscription(user, txid)
+                await self.save_subscription(user, txid)
                 
                 await update.message.reply_text(
                     f"✅ Maksājums apstiprināts!\n"
@@ -211,62 +172,58 @@ Nosūti man TXID pēc maksājuma veikšanas. (Sagaidi kamēr visi bloki ir apsti
                             float(transfer.get('amount_str', 0)) / 1000000 >= SUBSCRIPTION_PRICE):
                             
                             # Saglabā transakciju
-                            self.save_transaction(txid, user_id, float(transfer.get('amount_str', 0)) / 1000000)
+                            await self.save_transaction(txid, user_id, float(transfer.get('amount_str', 0)) / 1000000)
                             return True
-                    
-                    return False
-                    
+                
+                return False
+                
         except Exception as e:
             logger.error(f"Error verifying transaction: {e}")
             return False
 
-    def is_txid_used(self, txid: str) -> bool:
-        """Pārbauda vai TXID jau ir izmantots"""
-        conn = sqlite3.connect('subscriptions.db')
-        cursor = conn.cursor()
-        
-        cursor.execute("SELECT COUNT(*) FROM transactions WHERE txid = ?", (txid,))
-        count = cursor.fetchone()[0]
-        
-        conn.close()
-        return count > 0
+    async def is_txid_used(self, txid: str) -> bool:
+        """Pārbauda vai TXID jau ir izmantots Supabase datubāzē"""
+        try:
+            response = self.supabase.table("transactions").select("txid").eq("txid", txid).execute()
+            return len(response.data) > 0
+        except Exception as e:
+            logger.error(f"Error checking if TXID is used in Supabase: {e}")
+            return False
 
-    def save_transaction(self, txid: str, user_id: int, amount: float):
-        """Saglabā transakciju datubāzē"""
-        conn = sqlite3.connect('subscriptions.db')
-        cursor = conn.cursor()
-        
-        cursor.execute(
-            "INSERT OR REPLACE INTO transactions (txid, user_id, amount) VALUES (?, ?, ?)",
-            (txid, user_id, amount)
-        )
-        
-        conn.commit()
-        conn.close()
+    async def save_transaction(self, txid: str, user_id: int, amount: float):
+        """Saglabā transakciju Supabase datubāzē"""
+        try:
+            response = self.supabase.table("transactions").insert({
+                "txid": txid,
+                "user_id": user_id,
+                "amount": amount,
+                "verified_at": datetime.now().isoformat()
+            }).execute()
+            if response.status_code not in (200, 201):
+                logger.error(f"Error saving transaction to Supabase: {response.status_code} - {response.data}")
+        except Exception as e:
+            logger.error(f"Error saving transaction to Supabase: {e}")
 
-    def save_subscription(self, user, txid: str):
-        """Saglabā abonementu datubāzē"""
-        conn = sqlite3.connect('subscriptions.db')
-        cursor = conn.cursor()
-        
+    async def save_subscription(self, user, txid: str):
+        """Saglabā abonementu Supabase datubāzē (vai atjaunina, ja lietotājs jau eksistē)"""
         start_date = datetime.now()
         end_date = start_date + timedelta(days=SUBSCRIPTION_DAYS)
         
-        cursor.execute('''
-            INSERT OR REPLACE INTO subscriptions 
-            (user_id, username, first_name, txid, start_date, end_date, is_active, reminder_sent_12h)
-            VALUES (?, ?, ?, ?, ?, ?, 1, 0)
-        ''', (
-            user.id,
-            user.username or '',
-            user.first_name or '',
-            txid,
-            start_date.isoformat(),
-            end_date.isoformat()
-        ))
-        
-        conn.commit()
-        conn.close()
+        try:
+            response = self.supabase.table("subscriptions").upsert({
+                "user_id": user.id,
+                "username": user.username or '',
+                "first_name": user.first_name or '',
+                "txid": txid,
+                "start_date": start_date.isoformat(),
+                "end_date": end_date.isoformat(),
+                "is_active": True,
+                "reminder_sent_12h": False
+            }).execute()
+            if response.status_code not in (200, 201):
+                logger.error(f"Error saving subscription to Supabase: {response.status_code} - {response.data}")
+        except Exception as e:
+            logger.error(f"Error saving subscription to Supabase: {e}")
 
     async def add_user_to_group(self, user) -> bool:
         """Pievieno lietotāju grupai"""
@@ -292,21 +249,18 @@ Nosūti man TXID pēc maksājuma veikšanas. (Sagaidi kamēr visi bloki ir apsti
             return False
 
     async def status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Parāda lietotāja abonements statusu"""
+        """Parāda lietotāja abonements statusu no Supabase"""
         user = update.effective_user
         
-        conn = sqlite3.connect('subscriptions.db')
-        cursor = conn.cursor()
-        
-        cursor.execute(
-            "SELECT * FROM subscriptions WHERE user_id = ? AND is_active = 1",
-            (user.id,)
-        )
-        subscription = cursor.fetchone()
-        conn.close()
+        try:
+            response = self.supabase.table("subscriptions").select("*").eq("user_id", user.id).eq("is_active", True).execute()
+            subscription = response.data[0] if response.data else None
+        except Exception as e:
+            logger.error(f"Error fetching subscription status from Supabase: {e}")
+            subscription = None
         
         if subscription:
-            end_date = datetime.fromisoformat(subscription[5])
+            end_date = datetime.fromisoformat(subscription['end_date'])
             days_left = (end_date - datetime.now()).days
             
             status_text = f"""
@@ -315,7 +269,7 @@ Nosūti man TXID pēc maksājuma veikšanas. (Sagaidi kamēr visi bloki ir apsti
 ✅ Status: Aktīvs
 📅 Beigas: {end_date.strftime('%d.%m.%Y %H:%M')}
 ⏰ Atlikušās dienas: {days_left}
-💳 TXID: `{subscription[3]}`
+💳 TXID: `{subscription['txid']}`
             """
         else:
             status_text = "❌ Tev nav aktīva abonementa. Izmanto /start lai iegādātos."
@@ -323,31 +277,30 @@ Nosūti man TXID pēc maksājuma veikšanas. (Sagaidi kamēr visi bloki ir apsti
         await update.message.reply_text(status_text, parse_mode='Markdown')
 
     async def admin_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Admin komandas"""
+        """Admin komandas no Supabase"""
         if update.effective_user.id != ADMIN_USER_ID:
             await update.message.reply_text("❌ Nav atļaujas.")
             return
         
-        conn = sqlite3.connect('subscriptions.db')
-        cursor = conn.cursor()
-        
-        # Aktīvie abonenti
-        cursor.execute("SELECT COUNT(*) FROM subscriptions WHERE is_active = 1")
-        active_count = cursor.fetchone()[0]
-        
-        # Kopējie abonenti
-        cursor.execute("SELECT COUNT(*) FROM subscriptions")
-        total_count = cursor.fetchone()[0]
-        
-        # Šodienas ieņēmumi
-        today = datetime.now().date()
-        cursor.execute(
-            "SELECT SUM(amount) FROM transactions WHERE DATE(verified_at) = ?",
-            (today,)
-        )
-        today_revenue = cursor.fetchone()[0] or 0
-        
-        conn.close()
+        try:
+            # Aktīvie abonenti
+            active_count_resp = self.supabase.table("subscriptions").select("count", count="exact").eq("is_active", True).execute()
+            active_count = active_count_resp.count if active_count_resp.count is not None else 0
+            
+            # Kopējie abonenti
+            total_count_resp = self.supabase.table("subscriptions").select("count", count="exact").execute()
+            total_count = total_count_resp.count if total_count_resp.count is not None else 0
+            
+            # Šodienas ieņēmumi
+            today = datetime.now().date()
+            today_revenue_resp = self.supabase.table("transactions").select("amount").gte("verified_at", today.isoformat()).lt("verified_at", (today + timedelta(days=1)).isoformat()).execute()
+            today_revenue = sum(item['amount'] for item in today_revenue_resp.data) if today_revenue_resp.data else 0
+            
+        except Exception as e:
+            logger.error(f"Error fetching admin data from Supabase: {e}")
+            active_count = 0
+            total_count = 0
+            today_revenue = 0
         
         admin_text = f"""
 👑 **Admin panelis:**
@@ -372,27 +325,21 @@ Komandas:
             logger.error(f"Error notifying admin: {e}")
 
     async def send_subscription_reminders(self):
-        """Nosūta atgādinājumus par beidzošiem abonementiem (12h pirms)"""
-        conn = sqlite3.connect('subscriptions.db')
-        cursor = conn.cursor()
-        
+        """Nosūta atgādinājumus par beidzošiem abonementiem (12h pirms) no Supabase"""
         now = datetime.now()
         twelve_hours_from_now = now + timedelta(hours=12)
         
-        # Atrod aktīvos abonementus, kas beigsies nākamo 12 stundu laikā un kuriem atgādinājums vēl nav nosūtīts
-        cursor.execute('''
-            SELECT user_id, first_name, end_date 
-            FROM subscriptions 
-            WHERE is_active = 1 
-            AND datetime(end_date) > datetime(?) 
-            AND datetime(end_date) <= datetime(?)
-            AND reminder_sent_12h = 0
-        ''', (now.isoformat(), twelve_hours_from_now.isoformat()))
-        
-        users_to_remind = cursor.fetchall()
+        try:
+            response = self.supabase.table("subscriptions").select("user_id, first_name, end_date").eq("is_active", True).gte("end_date", now.isoformat()).lte("end_date", twelve_hours_from_now.isoformat()).eq("reminder_sent_12h", False).execute()
+            users_to_remind = response.data
+        except Exception as e:
+            logger.error(f"Error fetching users for reminders from Supabase: {e}")
+            users_to_remind = []
         
         for user_data in users_to_remind:
-            user_id, first_name, end_date_str = user_data
+            user_id = user_data['user_id']
+            first_name = user_data['first_name']
+            end_date_str = user_data['end_date']
             
             try:
                 await self.app.bot.send_message(
@@ -401,34 +348,30 @@ Komandas:
                 )
                 
                 # Atzīmē, ka atgādinājums ir nosūtīts
-                cursor.execute(
-                    "UPDATE subscriptions SET reminder_sent_12h = 1 WHERE user_id = ?",
-                    (user_id,)
-                )
+                update_resp = self.supabase.table("subscriptions").update({"reminder_sent_12h": True}).eq("user_id", user_id).execute()
+                if update_resp.status_code not in (200, 204):
+                    logger.error(f"Error updating reminder_sent_12h for {user_id}: {update_resp.status_code} - {update_resp.data}")
                 logger.info(f"Nosūtīts 12h atgādinājums lietotājam: {user_id}")
                 
             except Exception as e:
                 logger.error(f"Kļūda sūtot atgādinājumu lietotājam {user_id}: {e}")
-        
-        conn.commit()
-        conn.close()
 
     async def check_expired_subscriptions(self):
-        """Pārbauda beidzošos abonementus"""
-        conn = sqlite3.connect('subscriptions.db')
-        cursor = conn.cursor()
+        """Pārbauda beidzošos abonementus no Supabase"""
+        now = datetime.now()
         
-        # Atrod beidzošos abonementus
-        cursor.execute('''
-            SELECT user_id, username, first_name, end_date 
-            FROM subscriptions 
-            WHERE is_active = 1 AND datetime(end_date) <= datetime('now')
-        ''')
-        
-        expired_users = cursor.fetchall()
+        try:
+            response = self.supabase.table("subscriptions").select("user_id, username, first_name, end_date").eq("is_active", True).lte("end_date", now.isoformat()).execute()
+            expired_users = response.data
+        except Exception as e:
+            logger.error(f"Error fetching expired users from Supabase: {e}")
+            expired_users = []
         
         for user_data in expired_users:
-            user_id, username, first_name, end_date = user_data
+            user_id = user_data['user_id']
+            username = user_data['username']
+            first_name = user_data['first_name']
+            end_date = user_data['end_date']
             
             try:
                 # Izmet no grupas
@@ -444,10 +387,9 @@ Komandas:
                 )
                 
                 # Deaktivizē abonementu
-                cursor.execute(
-                    "UPDATE subscriptions SET is_active = 0 WHERE user_id = ?",
-                    (user_id,)
-                )
+                update_resp = self.supabase.table("subscriptions").update({"is_active": False}).eq("user_id", user_id).execute()
+                if update_resp.status_code not in (200, 204):
+                    logger.error(f"Error deactivating subscription for {user_id}: {update_resp.status_code} - {update_resp.data}")
                 
                 # Paziņo lietotājam
                 await self.app.bot.send_message(
@@ -460,9 +402,6 @@ Komandas:
                 
             except Exception as e:
                 logger.error(f"Error removing expired user {user_id}: {e}")
-        
-        conn.commit()
-        conn.close()
         
         if expired_users:
             await self.notify_admin(f"🔄 Noņemti {len(expired_users)} lietotāji ar beidzošiem abonementiem.")
