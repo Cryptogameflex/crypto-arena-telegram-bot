@@ -6,7 +6,7 @@ import logging
 import json
 # httpx vairs netiek tieši importēts šeit, jo Supabase to pārvalda iekšēji
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any
 import aiohttp
 from telegram import Update, User
@@ -204,7 +204,7 @@ Nosūti man TXID pēc maksājuma veikšanas. (Sagaidi kamēr visi bloki ir apsti
                   chat_id=chat_id,
                   text=f"✅ Maksājums apstiprināts!\n"
                        f"🎉 Tu esi pievienots Premium grupai uz {SUBSCRIPTION_DAYS} dienām.\n"
-                       f"📅 Abonements beigsies: {(datetime.now() + timedelta(days=SUBSCRIPTION_DAYS)).strftime('%d.%m.%Y %H:%M')}"
+                       f"📅 Abonements beigsies: {(datetime.now(timezone.utc) + timedelta(days=SUBSCRIPTION_DAYS)).strftime('%d.%m.%Y %H:%M')}"
               )
               
               await self.notify_admin(f"✅ Jauns dalībnieks: {user.first_name} (@{user.username})\nTXID: {txid}")
@@ -321,7 +321,7 @@ Nosūti man TXID pēc maksājuma veikšanas. (Sagaidi kamēr visi bloki ir apsti
               "txid": txid,
               "user_id": str(user_id), # Pārliecināmies, ka user_id tiek saglabāts kā string
               "amount": amount,
-              "verified_at": datetime.now().isoformat()
+              "verified_at": datetime.now(timezone.utc).isoformat()
           }).execute()
 
           logging.debug(f"🟢 Supabase raw response: {resp!r}")
@@ -343,7 +343,7 @@ Nosūti man TXID pēc maksājuma veikšanas. (Sagaidi kamēr visi bloki ir apsti
   async def save_subscription(self, user, txid: str):
       """Saglabā abonementu Supabase datubāzē"""
       logger.debug(f"Entered save_subscription function for user: {user.id}, TXID: {txid}")
-      start_date = datetime.now()
+      start_date = datetime.now(timezone.utc)
       end_date = start_date + timedelta(days=SUBSCRIPTION_DAYS)
       
       try:
@@ -356,7 +356,7 @@ Nosūti man TXID pēc maksājuma veikšanas. (Sagaidi kamēr visi bloki ir apsti
               "end_date": end_date.isoformat(),
               "is_active": True,
               "reminder_sent_12h": False,
-              "created_at": datetime.now().isoformat() # Pievienota created_at kolonna
+              "created_at": datetime.now(timezone.utc).isoformat() # Pievienota created_at kolonna
           }).execute()
           
           if response.data:
@@ -372,16 +372,54 @@ Nosūti man TXID pēc maksājuma veikšanas. (Sagaidi kamēr visi bloki ir apsti
       """Pievieno lietotāju grupai"""
       logger.debug(f"Entered add_user_to_group function for user: {user.id}")
       try:
+          # Mēģinām atbloķēt lietotāju, ja viņš iepriekš ir bijis izņemts/aizliegts
+          try:
+              await self.app.bot.unban_chat_member(chat_id=self.group_id, user_id=user.id)
+              logger.debug(f"Attempted to unban user {user.id} from group {self.group_id}.")
+          except TelegramError as e:
+              # Šī kļūda var rasties, ja lietotājs nav bijis aizliegts, kas ir normāli.
+              # Mēs to ignorējam, ja vien tā nav kāda cita kritiska kļūda.
+              error_message_safe = str(e).encode('ascii', 'replace').decode('ascii')
+              if "User not found" in error_message_safe or "User not in chat" in error_message_safe:
+                  logger.debug(f"User {user.id} was not banned in group {self.group_id} or already unbanned.")
+              else:
+                  logger.warning(f"Unexpected TelegramError during unban attempt for user {user.id}: {error_message_safe}")
+
+          # Pārbaudām, vai lietotājs jau ir grupā
+          try:
+              chat_member = await self.app.bot.get_chat_member(chat_id=self.group_id, user_id=user.id)
+              if chat_member.status in ['member', 'administrator', 'creator']:
+                  await self.app.bot.send_message(
+                      chat_id=user.id,
+                      text="✅ Tu jau esi Premium Kluba grupā! Tavs abonements ir atjaunots."
+                  )
+                  logger.info(f"User {user.id} is already in group {self.group_id}. Subscription confirmed.")
+                  return True
+          except TelegramError as e:
+              # Ja lietotājs nav atrasts grupā, tas ir normāli, turpinām ar linka ģenerēšanu
+              error_message_safe = str(e).encode('ascii', 'replace').decode('ascii')
+              if "User not found" in error_message_safe or "User not in chat" in error_message_safe:
+                  logger.debug(f"User {user.id} not found in group {self.group_id}, proceeding to generate invite link.")
+              else:
+                  # Citas Telegram kļūdas, kas nav saistītas ar lietotāja neesamību grupā
+                  logger.error(f"Error checking user membership in group: {error_message_safe}")
+                  await self.app.bot.send_message(
+                      chat_id=user.id,
+                      text="❌ Radās kļūda, pārbaudot tavu statusu grupā. Lūdzu sazinies ar administratoru."
+                  )
+                  return False
+
+          # Ja lietotājs nav grupā, ģenerējam un sūtam uzaicinājuma linku
           invite_link = await self.app.bot.create_chat_invite_link(
               chat_id=self.group_id,
               member_limit=1,
-              expire_date=datetime.now() + timedelta(hours=1)
+              expire_date=datetime.now(timezone.utc) + timedelta(hours=24) # Links derīgs 24 stundas
           )
           
           await self.app.bot.send_message(
               chat_id=user.id,
               text=f"🔗 Tavs personīgais uzaicinājuma links:\n{invite_link.invite_link}\n\n"
-                   f"⏰ Links derīgs 1 stundu."
+                   f"⏰ Links derīgs 24 stundas." # Atjaunināts teksts
           )
           logger.debug(f"Invite link sent to user {user.id}: {invite_link.invite_link}")
           return True
@@ -407,7 +445,7 @@ Nosūti man TXID pēc maksājuma veikšanas. (Sagaidi kamēr visi bloki ir apsti
       
       if subscription:
           end_date = datetime.fromisoformat(subscription['end_date'])
-          days_left = (end_date - datetime.now()).days
+          days_left = (end_date - datetime.now(timezone.utc)).days
           
           status_text = f"""
 📊 **Tavs abonements:**
@@ -440,7 +478,7 @@ Nosūti man TXID pēc maksājuma veikšanas. (Sagaidi kamēr visi bloki ir apsti
           total_count = total_count_resp.count if total_count_resp.count is not None else 0
           logger.debug(f"Total users count: {total_count}")
           
-          today = datetime.now().date()
+          today = datetime.now(timezone.utc).date()
           today_revenue_resp = self.supabase.table("transactions").select("amount").gte("verified_at", today.isoformat()).lt("verified_at", (today + timedelta(days=1)).isoformat()).execute()
           today_revenue = sum(item['amount'] for item in today_revenue_resp.data) if today_revenue_resp.data else 0
           logger.debug(f"Today's revenue: {today_revenue}")
@@ -480,7 +518,7 @@ Komandas:
   async def send_subscription_reminders(self):
       """Nosūta atgādinājumus par beidzošiem abonementiem"""
       logger.debug("Running send_subscription_reminders.")
-      now = datetime.now()
+      now = datetime.now(timezone.utc)
       twelve_hours_from_now = now + timedelta(hours=12)
       
       try:
@@ -515,7 +553,7 @@ Komandas:
   async def check_expired_subscriptions(self):
       """Pārbauda beidzošos abonementus"""
       logger.debug("Running check_expired_subscriptions.")
-      now = datetime.now()
+      now = datetime.now(timezone.utc)
       
       try:
           response = self.supabase.table("subscriptions").select("user_id, username, first_name, end_date").eq("is_active", True).lte("end_date", now.isoformat()).execute()
