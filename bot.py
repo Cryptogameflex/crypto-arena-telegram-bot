@@ -5,7 +5,7 @@ import asyncio
 import logging
 import json
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone # Pievienots `timezone`
 from typing import Optional, Dict, Any
 import aiohttp
 from telegram import Update, User, InlineKeyboardMarkup, InlineKeyboardButton
@@ -126,10 +126,11 @@ Lūdzu, izvēlies apmaksas veidu:
 """
       
       # Pārliecināmies, ka bot_username ir iestatīts
-      if not self.bot_username:
-          bot_info = await context.bot.get_me()
-          self.bot_username = bot_info.username
-          logger.debug(f"Bot username set to: {self.bot_username}")
+      # Šis bloks ir noņemts, jo bot_username tiek iestatīts `run` funkcijā pirms handleri tiek izsaukti.
+      # if not self.bot_username:
+      #     bot_info = await context.bot.get_me()
+      #     self.bot_username = bot_info.username
+      #     logger.debug(f"Bot username set to: {self.bot_username}")
 
       keyboard = InlineKeyboardMarkup([
           [InlineKeyboardButton("Apmaksāt ar USDT", url=f"https://t.me/{self.bot_username}?start=pay_usdt")],
@@ -265,7 +266,7 @@ Nosūti man TXID pēc maksājuma veikšanas. (Sagaidi kamēr visi bloki ir apsti
                   chat_id=chat_id,
                   text=f"✅ Maksājums apstiprināts!\n"
                        f"🎉 Tu esi pievienots Premium grupai uz {SUBSCRIPTION_DAYS} dienām.\n"
-                       f"📅 Abonements beigsies: {(datetime.now() + timedelta(days=SUBSCRIPTION_DAYS)).strftime('%d.%m.%Y %H:%M')}"
+                       f"📅 Abonements beigsies: {(datetime.now(timezone.utc) + timedelta(days=SUBSCRIPTION_DAYS)).strftime('%d.%m.%Y %H:%M')}"
               )
               
               await self.notify_admin(f"✅ Jauns dalībnieks: {user.first_name} (@{user.username})\nTXID: {txid}")
@@ -306,7 +307,7 @@ Nosūti man TXID pēc maksājuma veikšanas. (Sagaidi kamēr visi bloki ir apsti
   async def sendtx_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
       """Apstrādā /sendtx komandu ar TXID"""
       logger.debug("Entered sendtx_command function.")
-      logging.debug(f"💬 /sendtx triggered by @{update.effective_user.username} ({update.effective_user.id})")
+      logger.debug(f"💬 /sendtx triggered by @{update.effective_user.username} ({update.effective_user.id})")
       
       if not context.args:
           await update.message.reply_text(
@@ -375,36 +376,36 @@ Nosūti man TXID pēc maksājuma veikšanas. (Sagaidi kamēr visi bloki ir apsti
   async def save_transaction(self, txid: str, user_id: int, amount: float) -> bool:
       """Saglabā transakciju Supabase datubāzē"""
       logger.debug(f"Entered save_transaction function for TXID: {txid}, User ID: {user_id}, Amount: {amount}")
-      logging.debug(f"💾 save_transaction() called with user_id={user_id!r}, txid={txid!r}")
+      logger.debug(f"💾 save_transaction() called with user_id={user_id!r}, txid={txid!r}") # Changed to logger.debug
       
       try:
           resp = self.supabase.table("transactions").insert({
               "txid": txid,
               "user_id": str(user_id), # Pārliecināmies, ka user_id tiek saglabāts kā string
               "amount": amount,
-              "verified_at": datetime.now().isoformat()
+              "verified_at": datetime.now(timezone.utc).isoformat() # Labojums: izmanto timezone.utc
           }).execute()
 
-          logging.debug(f"🟢 Supabase raw response: {resp!r}")
+          logger.debug(f"🟢 Supabase raw response: {resp!r}") # Changed to logger.debug
           
           if hasattr(resp, "data") and resp.data:
-              logging.debug(f"✅ resp.data: {resp.data}")
+              logger.debug(f"✅ resp.data: {resp.data}") # Changed to logger.debug
               return True
           else:
-              logging.error(f"❌ No resp.data attribute, resp attrs: {dir(resp)}")
+              logger.error(f"❌ No resp.data attribute, resp attrs: {dir(resp)}") # Changed to logger.error
               if hasattr(resp, 'error') and resp.error:
-                  logging.error(f"🔺 Supabase error details: {resp.error}")
+                  logger.error(f"🔺 Supabase error details: {resp.error}") # Changed to logger.error
           return False
           
       except Exception as e:
           error_message_safe = str(e).encode('ascii', 'replace').decode('ascii')
-          logging.exception(f"🔺 Exception when inserting into Supabase: {error_message_safe}")
+          logger.exception(f"🔺 Exception when inserting into Supabase: {error_message_safe}") # Changed to logger.exception
           return False
 
   async def save_subscription(self, user, txid: str):
       """Saglabā abonementu Supabase datubāzē"""
       logger.debug(f"Entered save_subscription function for user: {user.id}, TXID: {txid}")
-      start_date = datetime.now()
+      start_date = datetime.now(timezone.utc) # Labojums: izmanto timezone.utc
       end_date = start_date + timedelta(days=SUBSCRIPTION_DAYS)
       
       try:
@@ -417,7 +418,7 @@ Nosūti man TXID pēc maksājuma veikšanas. (Sagaidi kamēr visi bloki ir apsti
               "end_date": end_date.isoformat(),
               "is_active": True,
               "reminder_sent_12h": False,
-              "created_at": datetime.now().isoformat() # Pievienota created_at kolonna
+              "created_at": datetime.now(timezone.utc).isoformat() # Pievienota created_at kolonna, izmanto timezone.utc
           }).execute()
           
           if response.data:
@@ -436,7 +437,7 @@ Nosūti man TXID pēc maksājuma veikšanas. (Sagaidi kamēr visi bloki ir apsti
           invite_link = await self.app.bot.create_chat_invite_link(
               chat_id=self.group_id,
               member_limit=1,
-              expire_date=datetime.now() + timedelta(hours=1)
+              expire_date=datetime.now(timezone.utc) + timedelta(hours=1) # Labojums: izmanto timezone.utc
           )
           
           await self.app.bot.send_message(
@@ -468,7 +469,7 @@ Nosūti man TXID pēc maksājuma veikšanas. (Sagaidi kamēr visi bloki ir apsti
       
       if subscription:
           end_date = datetime.fromisoformat(subscription['end_date'])
-          days_left = (end_date - datetime.now()).days
+          days_left = (end_date - datetime.now(timezone.utc)).days # Labojums: izmanto timezone.utc
           
           status_text = f"""
 📊 **Tavs abonements:**
@@ -501,7 +502,7 @@ Nosūti man TXID pēc maksājuma veikšanas. (Sagaidi kamēr visi bloki ir apsti
           total_count = total_count_resp.count if total_count_resp.count is not None else 0
           logger.debug(f"Total users count: {total_count}")
           
-          today = datetime.now().date()
+          today = datetime.now(timezone.utc).date() # Labojums: izmanto timezone.utc
           today_revenue_resp = self.supabase.table("transactions").select("amount").gte("verified_at", today.isoformat()).lt("verified_at", (today + timedelta(days=1)).isoformat()).execute()
           today_revenue = sum(item['amount'] for item in today_revenue_resp.data) if today_revenue_resp.data else 0
           logger.debug(f"Today's revenue: {today_revenue}")
@@ -541,7 +542,7 @@ Komandas:
   async def send_subscription_reminders(self):
       """Nosūta atgādinājumus par beidzošiem abonementiem"""
       logger.debug("Running send_subscription_reminders.")
-      now = datetime.now()
+      now = datetime.now(timezone.utc) # Labojums: izmanto timezone.utc
       twelve_hours_from_now = now + timedelta(hours=12)
       
       try:
@@ -576,7 +577,7 @@ Komandas:
   async def check_expired_subscriptions(self):
       """Pārbauda beidzošos abonementus"""
       logger.debug("Running check_expired_subscriptions.")
-      now = datetime.now()
+      now = datetime.now(timezone.utc) # Labojums: izmanto timezone.utc
       
       try:
           response = self.supabase.table("subscriptions").select("user_id, username, first_name, end_date").eq("is_active", True).lte("end_date", now.isoformat()).execute()
@@ -667,6 +668,6 @@ Komandas:
 
 
 if __name__ == "__main__":
-  logging.info("🚀 Bot starting...")
+  logger.info("🚀 Bot starting...") # Changed to logger.info
   bot = CryptoArenaBot()
   asyncio.run(bot.run())
