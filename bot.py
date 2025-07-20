@@ -1,6 +1,19 @@
 import os
 import sys
 import locale
+import asyncio
+import logging
+import json
+# httpx vairs netiek tieši importēts šeit, jo Supabase to pārvalda iekšēji
+
+from datetime import datetime, timedelta
+from typing import Optional, Dict, Any
+import aiohttp
+from telegram import Update, User
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.error import TelegramError
+from dotenv import load_dotenv
+from supabase import create_client, Client
 
 # PIEVIENOJIET ŠO KODA SĀKUMĀ - pirms citiem importiem
 os.environ['PYTHONIOENCODING'] = 'utf-8'
@@ -16,25 +29,13 @@ except locale.Error:
     except locale.Error:
         pass  # Turpināt bez locale iestatījumiem
 
-import asyncio
-import logging
-from datetime import datetime, timedelta
-from typing import Optional, Dict, Any
-import aiohttp
-import json
-from telegram import Update, User
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from telegram.error import TelegramError
-from dotenv import load_dotenv
-from supabase import create_client, Client
-
 # Ielādējam vides mainīgos no .env faila
 load_dotenv()
 
 # Konfigurācija - tagad lasām no vides mainīgajiem
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID"))
-GROUP_ID = int(os.getenv("GROUP_ID"))
+ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID")) if os.getenv("ADMIN_USER_ID") else None
+GROUP_ID = int(os.getenv("GROUP_ID")) if os.getenv("GROUP_ID") else None
 TRONSCAN_API_KEY = os.getenv("TRONSCAN_API_KEY")
 WALLET_ADDRESS = os.getenv("WALLET_ADDRESS")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -69,24 +70,35 @@ logging.getLogger("supabase").setLevel(logging.WARNING)
 class CryptoArenaBot:
     def __init__(self):
         # Pārbaudām, vai visi nepieciešamie vides mainīgie ir iestatīti
-        if not all([TELEGRAM_BOT_TOKEN, ADMIN_USER_ID, GROUP_ID, TRONSCAN_API_KEY, WALLET_ADDRESS, SUPABASE_URL, SUPABASE_KEY]):
+        self.telegram_bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
+        self.admin_user_id = int(os.getenv("ADMIN_USER_ID")) if os.getenv("ADMIN_USER_ID") else None
+        self.group_id = int(os.getenv("GROUP_ID")) if os.getenv("GROUP_ID") else None
+        self.tronscan_api_key = os.getenv("TRONSCAN_API_KEY")
+        self.wallet_address = os.getenv("WALLET_ADDRESS")
+        self.supabase_url = os.getenv("SUPABASE_URL")
+        self.supabase_key = os.getenv("SUPABASE_KEY")
+
+        if not all([self.telegram_bot_token, self.admin_user_id is not None, self.group_id is not None, self.tronscan_api_key, self.wallet_address, self.supabase_url, self.supabase_key]):
             logger.error("Trūkst viens vai vairāki nepieciešamie vides mainīgie. Lūdzu, pārbaudiet .env failu vai servera konfigurāciju.")
             raise ValueError("Trūkst vides mainīgie.")
 
-        self.app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+        self.app = Application.builder().token(self.telegram_bot_token).build()
         
         # Pievienots error handling Supabase klientam
         try:
-            self.supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-            logging.debug(f"🔑 Loaded SUPABASE_URL='{SUPABASE_URL}'")
-            logging.debug(f"🔑 Loaded SUPABASE_KEY='{SUPABASE_KEY[:8]}'...")
+            # Noņemam pielāgoto httpx.Client un ļaujam supabase-py pārvaldīt savu
+            self.supabase: Client = create_client(self.supabase_url, self.supabase_key)
+            logger.debug(f"🔑 Loaded SUPABASE_URL='{self.supabase_url}'")
+            logger.debug(f"🔑 Loaded SUPABASE_KEY='{self.supabase_key[:8]}'...")
             
             # Testējam Supabase savienojumu
             test_response = self.supabase.table("transactions").select("count", count="exact").limit(0).execute()
-            logging.info("✅ Supabase savienojums veiksmīgs")
+            logger.info("✅ Supabase savienojums veiksmīgs")
             
         except Exception as e:
-            logging.error(f"❌ Supabase savienojuma kļūda: {e}")
+            # Žurnālējam kļūdu ar ASCII aizvietošanu, lai novērstu turpmākas kodēšanas problēmas žurnālos
+            error_message_safe = str(e).encode('ascii', 'replace').decode('ascii')
+            logger.error(f"❌ Supabase savienojuma kļūda: {error_message_safe}")
             raise
             
         self.setup_handlers()
@@ -115,7 +127,7 @@ Lai pievienotos Premium klubam, tev jāveic maksājums:
 🌐 **Tīkls:** TRC-20 (Tron)
 
 📍 **Maksājuma adrese:**
-`{WALLET_ADDRESS}`
+`{self.wallet_address}`
 
 **Instrukcijas:**
 1. Nosūti {SUBSCRIPTION_PRICE} USDT uz augstāk norādīto adresi
@@ -131,44 +143,43 @@ Nosūti man TXID pēc maksājuma veikšanas. (Sagaidi kamēr visi bloki ir apsti
             welcome_text, 
             parse_mode='Markdown'
         )
-        logging.debug("✅ /start fired!")
+        logger.debug("✅ /start fired!")
 
     async def is_txid_used(self, txid: str) -> bool:
         """Pārbauda vai TXID jau ir izmantots Supabase datubāzē"""
-        print(f"DEBUG: Checking if TXID is used: {txid}")
+        logger.debug(f"Checking if TXID is used: {txid}")
         try:
             response = self.supabase.table("transactions").select("txid").eq("txid", txid).execute()
-            print(f"DEBUG: Supabase is_txid_used response data: {response.data}")
+            logger.debug(f"Supabase is_txid_used response data: {response.data}")
             
-            # LABOJUMS: Pareiza kļūdas ziņojuma loģika
             if len(response.data) > 0:
-                logging.warning(f"TXID {txid} jau ir izmantots")
+                logger.warning(f"TXID {txid} jau ir izmantots")
                 return True
             else:
-                logging.info(f"TXID {txid} nav izmantots - var turpināt")
+                logger.info(f"TXID {txid} nav izmantots - var turpināt")
                 return False
                 
         except Exception as e:
-            logger.error(f"Error checking if TXID is used in Supabase: {e}")
-            print(f"DEBUG: Exception in is_txid_used: {e}")
+            error_message_safe = str(e).encode('ascii', 'replace').decode('ascii')
+            logger.error(f"Error checking if TXID is used in Supabase: {error_message_safe}")
             return False
 
     async def _process_txid(self, chat_id: int, user: User, txid: str, context: ContextTypes.DEFAULT_TYPE):
         """Galvenā loģika TXID apstrādei"""
-        print(f"DEBUG: Entered _process_txid function for user {user.id}")
-        print(f"DEBUG: TXID received: {repr(txid)}")
-        print(f"DEBUG: Length of TXID received: {len(txid)}")
+        logger.debug(f"Entered _process_txid function for user {user.id}")
+        logger.debug(f"TXID received: {repr(txid)}")
+        logger.debug(f"Length of TXID received: {len(txid)}")
 
         is_valid = False
         test_txid_value = "TEST_TXID_FOR_SUPABASE_SAVE_0123456789ABCDEF0123456789ABCDEF01234"
         
         if txid == test_txid_value:
-            print("DEBUG: Using test TXID, bypassing TronScan verification.")
+            logger.debug("Using test TXID, bypassing TronScan verification.")
             is_valid = await self.save_transaction(txid, user.id, SUBSCRIPTION_PRICE)
             if is_valid:
-                print("DEBUG: Test TXID saved to Supabase successfully.")
+                logger.debug("Test TXID saved to Supabase successfully.")
             else:
-                print("DEBUG: Failed to save test TXID to Supabase.")
+                logger.debug("Failed to save test TXID to Supabase.")
         else:
             # Pārbauda vai TXID formāts ir pareizs
             if len(txid) != 64:
@@ -176,28 +187,27 @@ Nosūti man TXID pēc maksājuma veikšanas. (Sagaidi kamēr visi bloki ir apsti
                     chat_id=chat_id,
                     text="❌ Nepareizs TXID formāts. TXID jābūt 64 simbolu garam."
                 )
-                print(f"DEBUG: Invalid TXID format: {repr(txid)}")
+                logger.debug(f"Invalid TXID format: {repr(txid)}")
                 return
             
-            # LABOJUMS: Pareiza kļūdas ziņojuma loģika
             if await self.is_txid_used(txid):
                 await context.bot.send_message(
                     chat_id=chat_id,
                     text="❌ Šis TXID jau ir izmantots. Katrs TXID var tikt izmantots tikai vienu reizi."
                 )
-                print(f"DEBUG: TXID already used: {txid}")
+                logger.debug(f"TXID already used: {txid}")
                 return
             
             await context.bot.send_message(chat_id=chat_id, text="🔍 Pārbaudu maksājumu... Lūdzu uzgaidi.")
-            print(f"DEBUG: Verifying transaction for TXID: {txid}")
+            logger.debug(f"Verifying transaction for TXID: {txid}")
             is_valid = await self.verify_transaction(txid, user.id)
         
         if is_valid:
-            print("DEBUG: Transaction is valid.")
+            logger.debug("Transaction is valid.")
             success = await self.add_user_to_group(user)
             
             if success:
-                print("DEBUG: User added to group successfully.")
+                logger.debug("User added to group successfully.")
                 await self.save_subscription(user, txid)
                 
                 await context.bot.send_message(
@@ -209,13 +219,13 @@ Nosūti man TXID pēc maksājuma veikšanas. (Sagaidi kamēr visi bloki ir apsti
                 
                 await self.notify_admin(f"✅ Jauns dalībnieks: {user.first_name} (@{user.username})\nTXID: {txid}")
             else:
-                print("DEBUG: Failed to add user to group.")
+                logger.debug("Failed to add user to group.")
                 await context.bot.send_message(
                     chat_id=chat_id,
                     text="❌ Neizdevās pievienot grupai. Lūdzu sazinies ar administratoru."
                 )
         else:
-            print("DEBUG: Transaction is NOT valid.")
+            logger.debug("Transaction is NOT valid.")
             await context.bot.send_message(
                 chat_id=chat_id,
                 text="❌ Maksājums nav atrasts vai nav derīgs.\n"
@@ -226,25 +236,25 @@ Nosūti man TXID pēc maksājuma veikšanas. (Sagaidi kamēr visi bloki ir apsti
                      "• Maksājums nosūtīts uz pareizo adresi\n"
                      "• Sazināties ar atbalstu @arenasupport"
             )
-        print("DEBUG: Exited _process_txid function.")
+        logger.debug("Exited _process_txid function.")
 
     async def handle_txid(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Apstrādā TXID ziņojumus"""
-        print("DEBUG: Entered handle_txid function.")
+        logger.debug("Entered handle_txid function.")
         if update.message.chat.type != 'private':
             return
 
         user = update.effective_user
-        print(f"DEBUG: Raw update.message.text: {repr(update.message.text)}")
-        print(f"DEBUG: Length of raw update.message.text: {len(update.message.text)}")
+        logger.debug(f"Raw update.message.text: {repr(update.message.text)}")
+        logger.debug(f"Length of raw update.message.text: {len(update.message.text)}")
 
         txid = update.message.text.strip()
         await self._process_txid(update.effective_chat.id, user, txid, context)
-        print("DEBUG: Exited handle_txid function.")
+        logger.debug("Exited handle_txid function.")
 
     async def sendtx_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Apstrādā /sendtx komandu ar TXID"""
-        print("DEBUG: Entered sendtx_command function.")
+        logger.debug("Entered sendtx_command function.")
         logging.debug(f"💬 /sendtx triggered by @{update.effective_user.username} ({update.effective_user.id})")
         
         if not context.args:
@@ -252,132 +262,128 @@ Nosūti man TXID pēc maksājuma veikšanas. (Sagaidi kamēr visi bloki ir apsti
                 "Lūdzu, ieraksti TXID:\n`/sendtx <TXID>`",
                 parse_mode='Markdown'
             )
-            print("DEBUG: No TXID provided in /sendtx command.")
+            logger.debug("No TXID provided in /sendtx command.")
             return
 
         raw_txid_arg = context.args[0]
-        print(f"DEBUG: Raw TXID from context.args[0]: {repr(raw_txid_arg)}")
-        print(f"DEBUG: Length of raw TXID: {len(raw_txid_arg)}")
+        logger.debug(f"Raw TXID from context.args[0]: {repr(raw_txid_arg)}")
+        logger.debug(f"Length of raw TXID: {len(raw_txid_arg)}")
 
         txid = raw_txid_arg.strip()
-        print(f"DEBUG: TXID after strip() in sendtx_command: {repr(txid)}")
-        print(f"DEBUG: Length of TXID after strip() in sendtx_command: {len(txid)}")
+        logger.debug(f"TXID after strip() in sendtx_command: {repr(txid)}")
+        logger.debug(f"Length of TXID after strip() in sendtx_command: {len(txid)}")
         
         if update.message.chat.type != 'private':
             await update.message.reply_text("Šo komandu var izmantot tikai privātā sarunā ar botu.")
-            print("DEBUG: /sendtx used in non-private chat.")
+            logger.debug("/sendtx used in non-private chat.")
             return
 
         await self._process_txid(update.effective_chat.id, update.effective_user, txid, context)
-        print("DEBUG: Exited sendtx_command function.")
+        logger.debug("Exited sendtx_command function.")
 
     async def verify_transaction(self, txid: str, user_id: int) -> bool:
         """Verificē transakciju caur TronScan API"""
-        print(f"DEBUG: Entered verify_transaction function for TXID: {txid}")
+        logger.debug(f"Entered verify_transaction function for TXID: {txid}")
         try:
             url = f"https://apilist.tronscanapi.com/api/transaction-info?hash={txid}"
             headers = {
-                "TRON-PRO-API-KEY": TRONSCAN_API_KEY
+                "TRON-PRO-API-KEY": self.tronscan_api_key
             }
             
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, headers=headers) as response:
-                    print(f"DEBUG: TronScan API response status: {response.status}")
+                    logger.debug(f"TronScan API response status: {response.status}")
                     if response.status != 200:
                         logger.error(f"TronScan API error: {response.status}")
                         return False
                     
                     data = await response.json()
-                    print(f"DEBUG: TronScan API response data: {json.dumps(data, indent=2)}")
+                    logger.debug(f"TronScan API response data: {json.dumps(data, indent=2)}")
                     
                     if not data or 'trc20TransferInfo' not in data:
-                        print("DEBUG: No trc20TransferInfo found in TronScan response.")
+                        logger.debug("No trc20TransferInfo found in TronScan response.")
                         return False
                     
                     transfers = data.get('trc20TransferInfo', [])
                     
                     for transfer in transfers:
-                        if (transfer.get('to_address') == WALLET_ADDRESS and 
+                        if (transfer.get('to_address') == self.wallet_address and 
                             float(transfer.get('amount_str', 0)) / 1000000 >= SUBSCRIPTION_PRICE):
                             
-                            print(f"DEBUG: Valid transfer found: {transfer}")
+                            logger.debug(f"Valid transfer found: {transfer}")
                             return await self.save_transaction(txid, user_id, float(transfer.get('amount_str', 0)) / 1000000)
             
-            print("DEBUG: No valid transfer found to WALLET_ADDRESS with sufficient amount.")
+            logger.debug("No valid transfer found to WALLET_ADDRESS with sufficient amount.")
             return False
             
         except Exception as e:
-            logger.error(f"Error verifying transaction: {e}")
-            print(f"DEBUG: Exception in verify_transaction: {e}")
+            error_message_safe = str(e).encode('ascii', 'replace').decode('ascii')
+            logger.error(f"Error verifying transaction: {error_message_safe}")
             return False
 
     async def save_transaction(self, txid: str, user_id: int, amount: float) -> bool:
         """Saglabā transakciju Supabase datubāzē"""
-        print(f"DEBUG: Entered save_transaction function for TXID: {txid}, User ID: {user_id}, Amount: {amount}")
+        logger.debug(f"Entered save_transaction function for TXID: {txid}, User ID: {user_id}, Amount: {amount}")
         logging.debug(f"💾 save_transaction() called with user_id={user_id!r}, txid={txid!r}")
         
         try:
             resp = self.supabase.table("transactions").insert({
                 "txid": txid,
-                "user_id": user_id,
+                "user_id": str(user_id), # Pārliecināmies, ka user_id tiek saglabāts kā string
                 "amount": amount,
                 "verified_at": datetime.now().isoformat()
             }).execute()
 
             logging.debug(f"🟢 Supabase raw response: {resp!r}")
-            print(f"DEBUG: Supabase insert raw response: {resp}")
             
             if hasattr(resp, "data") and resp.data:
                 logging.debug(f"✅ resp.data: {resp.data}")
-                print(f"DEBUG: Supabase insert successful, data: {resp.data}")
                 return True
             else:
                 logging.error(f"❌ No resp.data attribute, resp attrs: {dir(resp)}")
-                print(f"DEBUG: Supabase insert failed or no data. Response attributes: {dir(resp)}")
                 if hasattr(resp, 'error') and resp.error:
                     logging.error(f"🔺 Supabase error details: {resp.error}")
-                    print(f"DEBUG: Supabase error details: {resp.error}")
             return False
             
         except Exception as e:
-            logging.exception(f"🔺 Exception when inserting into Supabase: {e}")
-            print(f"DEBUG: Exception in save_transaction: {e}")
+            error_message_safe = str(e).encode('ascii', 'replace').decode('ascii')
+            logging.exception(f"🔺 Exception when inserting into Supabase: {error_message_safe}")
             return False
 
     async def save_subscription(self, user, txid: str):
         """Saglabā abonementu Supabase datubāzē"""
-        print(f"DEBUG: Entered save_subscription function for user: {user.id}, TXID: {txid}")
+        logger.debug(f"Entered save_subscription function for user: {user.id}, TXID: {txid}")
         start_date = datetime.now()
         end_date = start_date + timedelta(days=SUBSCRIPTION_DAYS)
         
         try:
             response = self.supabase.table("subscriptions").upsert({
-                "user_id": user.id,
+                "user_id": str(user.id), # Pārliecināmies, ka user_id tiek saglabāts kā string
                 "username": user.username or '',
                 "first_name": user.first_name or '',
                 "txid": txid,
                 "start_date": start_date.isoformat(),
                 "end_date": end_date.isoformat(),
                 "is_active": True,
-                "reminder_sent_12h": False
+                "reminder_sent_12h": False,
+                "created_at": datetime.now().isoformat() # Pievienota created_at kolonna
             }).execute()
             
             if response.data:
-                print(f"DEBUG: Supabase save_subscription successful, data: {response.data}")
+                logger.debug(f"Supabase save_subscription successful, data: {response.data}")
             else:
                 logger.error(f"Error saving subscription to Supabase: No data returned. Error: {response.error if hasattr(response, 'error') else 'N/A'}")
-                print(f"DEBUG: Supabase save_subscription error: No data returned. Error: {response.error if hasattr(response, 'error') else 'N/A'}")
                 
         except Exception as e:
-            logger.error(f"Error saving subscription to Supabase: {e}")
-            print(f"DEBUG: Exception in save_subscription: {e}")
+            error_message_safe = str(e).encode('ascii', 'replace').decode('ascii')
+            logger.error(f"Error saving subscription to Supabase: {error_message_safe}")
 
     async def add_user_to_group(self, user) -> bool:
         """Pievieno lietotāju grupai"""
-        print(f"DEBUG: Entered add_user_to_group function for user: {user.id}")
+        logger.debug(f"Entered add_user_to_group function for user: {user.id}")
         try:
             invite_link = await self.app.bot.create_chat_invite_link(
-                chat_id=GROUP_ID,
+                chat_id=self.group_id,
                 member_limit=1,
                 expire_date=datetime.now() + timedelta(hours=1)
             )
@@ -387,26 +393,26 @@ Nosūti man TXID pēc maksājuma veikšanas. (Sagaidi kamēr visi bloki ir apsti
                 text=f"🔗 Tavs personīgais uzaicinājuma links:\n{invite_link.invite_link}\n\n"
                      f"⏰ Links derīgs 1 stundu."
             )
-            print(f"DEBUG: Invite link sent to user {user.id}: {invite_link.invite_link}")
+            logger.debug(f"Invite link sent to user {user.id}: {invite_link.invite_link}")
             return True
             
         except Exception as e:
-            logger.error(f"Error adding user to group: {e}")
-            print(f"DEBUG: Exception in add_user_to_group: {e}")
+            error_message_safe = str(e).encode('ascii', 'replace').decode('ascii')
+            logger.error(f"Error adding user to group: {error_message_safe}")
             return False
 
     async def status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Parāda lietotāja abonements statusu"""
-        print(f"DEBUG: Entered status_command for user: {update.effective_user.id}")
+        logger.debug(f"Entered status_command for user: {update.effective_user.id}")
         user = update.effective_user
         
         try:
-            response = self.supabase.table("subscriptions").select("*").eq("user_id", user.id).eq("is_active", True).execute()
+            response = self.supabase.table("subscriptions").select("*").eq("user_id", str(user.id)).eq("is_active", True).execute()
             subscription = response.data[0] if response.data else None
-            print(f"DEBUG: Supabase status_command response data: {response.data}")
+            logger.debug(f"Supabase status_command response data: {response.data}")
         except Exception as e:
-            logger.error(f"Error fetching subscription status from Supabase: {e}")
-            print(f"DEBUG: Exception in status_command (fetching from Supabase): {e}")
+            error_message_safe = str(e).encode('ascii', 'replace').decode('ascii')
+            logger.error(f"Error fetching subscription status from Supabase: {error_message_safe}")
             subscription = None
         
         if subscription:
@@ -425,33 +431,33 @@ Nosūti man TXID pēc maksājuma veikšanas. (Sagaidi kamēr visi bloki ir apsti
             status_text = "❌ Tev nav aktīva abonementa. Izmanto /start lai iegādātos."
         
         await update.message.reply_text(status_text, parse_mode='Markdown')
-        print("DEBUG: Status message sent.")
+        logger.debug("Status message sent.")
 
     async def admin_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Admin komandas"""
-        print(f"DEBUG: Entered admin_command for user: {update.effective_user.id}")
-        if update.effective_user.id != ADMIN_USER_ID:
+        logger.debug(f"Entered admin_command for user: {update.effective_user.id}")
+        if update.effective_user.id != self.admin_user_id:
             await update.message.reply_text("❌ Nav atļaujas.")
-            print("DEBUG: Unauthorized admin access attempt.")
+            logger.debug("Unauthorized admin access attempt.")
             return
         
         try:
             active_count_resp = self.supabase.table("subscriptions").select("count", count="exact").eq("is_active", True).execute()
             active_count = active_count_resp.count if active_count_resp.count is not None else 0
-            print(f"DEBUG: Active users count: {active_count}")
+            logger.debug(f"Active users count: {active_count}")
             
             total_count_resp = self.supabase.table("subscriptions").select("count", count="exact").execute()
             total_count = total_count_resp.count if total_count_resp.count is not None else 0
-            print(f"DEBUG: Total users count: {total_count}")
+            logger.debug(f"Total users count: {total_count}")
             
             today = datetime.now().date()
             today_revenue_resp = self.supabase.table("transactions").select("amount").gte("verified_at", today.isoformat()).lt("verified_at", (today + timedelta(days=1)).isoformat()).execute()
             today_revenue = sum(item['amount'] for item in today_revenue_resp.data) if today_revenue_resp.data else 0
-            print(f"DEBUG: Today's revenue: {today_revenue}")
+            logger.debug(f"Today's revenue: {today_revenue}")
             
         except Exception as e:
-            logger.error(f"Error fetching admin data from Supabase: {e}")
-            print(f"DEBUG: Exception in admin_command (fetching from Supabase): {e}")
+            error_message_safe = str(e).encode('ascii', 'replace').decode('ascii')
+            logger.error(f"Error fetching admin data from Supabase: {error_message_safe}")
             active_count = 0
             total_count = 0
             today_revenue = 0
@@ -470,30 +476,30 @@ Komandas:
     """
         
         await update.message.reply_text(admin_text, parse_mode='Markdown')
-        print("DEBUG: Admin panel message sent.")
+        logger.debug("Admin panel message sent.")
 
     async def notify_admin(self, message: str):
         """Nosūta ziņojumu adminam"""
-        print(f"DEBUG: Notifying admin: {message}")
+        logger.debug(f"Notifying admin: {message}")
         try:
-            await self.app.bot.send_message(chat_id=ADMIN_USER_ID, text=message)
+            await self.app.bot.send_message(chat_id=self.admin_user_id, text=message)
         except Exception as e:
-            logger.error(f"Error notifying admin: {e}")
-            print(f"DEBUG: Exception in notify_admin: {e}")
+            error_message_safe = str(e).encode('ascii', 'replace').decode('ascii')
+            logger.error(f"Error notifying admin: {error_message_safe}")
 
     async def send_subscription_reminders(self):
         """Nosūta atgādinājumus par beidzošiem abonementiem"""
-        print("DEBUG: Running send_subscription_reminders.")
+        logger.debug("Running send_subscription_reminders.")
         now = datetime.now()
         twelve_hours_from_now = now + timedelta(hours=12)
         
         try:
             response = self.supabase.table("subscriptions").select("user_id, first_name, end_date").eq("is_active", True).gte("end_date", now.isoformat()).lte("end_date", twelve_hours_from_now.isoformat()).eq("reminder_sent_12h", False).execute()
             users_to_remind = response.data
-            print(f"DEBUG: Users to remind: {users_to_remind}")
+            logger.debug(f"Users to remind: {users_to_remind}")
         except Exception as e:
-            logger.error(f"Error fetching users for reminders from Supabase: {e}")
-            print(f"DEBUG: Exception in send_subscription_reminders (fetching from Supabase): {e}")
+            error_message_safe = str(e).encode('ascii', 'replace').decode('ascii')
+            logger.error(f"Error fetching users for reminders from Supabase: {error_message_safe}")
             users_to_remind = []
         
         for user_data in users_to_remind:
@@ -510,25 +516,24 @@ Komandas:
                 update_resp = self.supabase.table("subscriptions").update({"reminder_sent_12h": True}).eq("user_id", user_id).execute()
                 if not update_resp.data:
                     logger.error(f"Error updating reminder_sent_12h for {user_id}: No data returned. Error: {update_resp.error if hasattr(update_resp, 'error') else 'N/A'}")
-                    print(f"DEBUG: Error updating reminder_sent_12h for {user_id}: No data returned. Error: {update_resp.error if hasattr(update_resp, 'error') else 'N/A'}")
                 logger.info(f"Nosūtīts 12h atgādinājums lietotājam: {user_id}")
                 
             except Exception as e:
-                logger.error(f"Kļūda sūtot atgādinājumu lietotājam {user_id}: {e}")
-                print(f"DEBUG: Exception sending reminder to {user_id}: {e}")
+                error_message_safe = str(e).encode('ascii', 'replace').decode('ascii')
+                logger.error(f"Kļūda sūtot atgādinājumu lietotājam {user_id}: {error_message_safe}")
 
     async def check_expired_subscriptions(self):
         """Pārbauda beidzošos abonementus"""
-        print("DEBUG: Running check_expired_subscriptions.")
+        logger.debug("Running check_expired_subscriptions.")
         now = datetime.now()
         
         try:
             response = self.supabase.table("subscriptions").select("user_id, username, first_name, end_date").eq("is_active", True).lte("end_date", now.isoformat()).execute()
             expired_users = response.data
-            print(f"DEBUG: Expired users found: {expired_users}")
+            logger.debug(f"Expired users found: {expired_users}")
         except Exception as e:
-            logger.error(f"Error fetching expired users from Supabase: {e}")
-            print(f"DEBUG: Exception in check_expired_subscriptions (fetching from Supabase): {e}")
+            error_message_safe = str(e).encode('ascii', 'replace').decode('ascii')
+            logger.error(f"Error fetching expired users from Supabase: {error_message_safe}")
             expired_users = []
         
         for user_data in expired_users:
@@ -539,19 +544,18 @@ Komandas:
             
             try:
                 await self.app.bot.ban_chat_member(
-                    chat_id=GROUP_ID,
+                    chat_id=self.group_id,
                     user_id=user_id
                 )
                 
                 await self.app.bot.unban_chat_member(
-                    chat_id=GROUP_ID,
+                    chat_id=self.group_id,
                     user_id=user_id
                 )
                 
                 update_resp = self.supabase.table("subscriptions").update({"is_active": False}).eq("user_id", user_id).execute()
                 if not update_resp.data:
                     logger.error(f"Error deactivating subscription for {user_id}: No data returned. Error: {update_resp.error if hasattr(update_resp, 'error') else 'N/A'}")
-                    print(f"DEBUG: Error deactivating subscription for {user_id}: No data returned. Error: {update_resp.error if hasattr(update_resp, 'error') else 'N/A'}")
                 
                 await self.app.bot.send_message(
                     chat_id=user_id,
@@ -560,27 +564,25 @@ Komandas:
                 )
                 
                 logger.info(f"Removed expired user: {user_id}")
-                print(f"DEBUG: User {user_id} removed and notified.")
                 
             except Exception as e:
-                logger.error(f"Error removing expired user {user_id}: {e}")
-                print(f"DEBUG: Exception removing expired user {user_id}: {e}")
+                error_message_safe = str(e).encode('ascii', 'replace').decode('ascii')
+                logger.error(f"Error removing expired user {user_id}: {error_message_safe}")
         
         if expired_users:
             await self.notify_admin(f"🔄 Noņemti {len(expired_users)} lietotāji ar beidzošiem abonementiem.")
-            print(f"DEBUG: Admin notified about {len(expired_users)} expired users.")
 
     async def subscription_checker(self):
         """Periodiski pārbauda abonementus un sūta atgādinājumus"""
-        print("DEBUG: Starting subscription_checker loop.")
+        logger.debug("Starting subscription_checker loop.")
         while True:
             try:
                 await self.send_subscription_reminders()
                 await self.check_expired_subscriptions()
                 await asyncio.sleep(3600)  # Pārbauda katru stundu
             except Exception as e:
-                logger.error(f"Error in subscription checker: {e}")
-                print(f"DEBUG: Exception in subscription_checker loop: {e}")
+                error_message_safe = str(e).encode('ascii', 'replace').decode('ascii')
+                logger.error(f"Error in subscription checker: {error_message_safe}")
                 await asyncio.sleep(300)  # Mēģina atkal pēc 5 minūtēm
 
     async def run(self):
