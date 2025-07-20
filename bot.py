@@ -96,7 +96,6 @@ class CryptoArenaBot:
           logger.info("✅ Supabase savienojums veiksmīgs")
           
       except Exception as e:
-          # Žurnālējam kļūdu ar ASCII aizvietošanu, lai novērstu turpmākas kodēšanas problēmas žurnālos
           error_message_safe = str(e).encode('ascii', 'replace').decode('ascii')
           logger.error(f"❌ Supabase savienojuma kļūda: {error_message_safe}")
           raise
@@ -171,36 +170,27 @@ Nosūti man TXID pēc maksājuma veikšanas. (Sagaidi kamēr visi bloki ir apsti
       logger.debug(f"Length of TXID received: {len(txid)}")
 
       is_valid = False
-      test_txid_value = "TEST_TXID_FOR_SUPABASE_SAVE_0123456789ABCDEF0123456789ABCDEF01234"
       
-      if txid == test_txid_value:
-          logger.debug("Using test TXID, bypassing TronScan verification.")
-          is_valid = await self.save_transaction(txid, user.id, SUBSCRIPTION_PRICE)
-          if is_valid:
-              logger.debug("Test TXID saved to Supabase successfully.")
-          else:
-              logger.debug("Failed to save test TXID to Supabase.")
-      else:
-          # Pārbauda vai TXID formāts ir pareizs
-          if len(txid) != 64:
-              await context.bot.send_message(
-                  chat_id=chat_id,
-                  text="❌ Nepareizs TXID formāts. TXID jābūt 64 simbolu garam."
-              )
-              logger.debug(f"Invalid TXID format: {repr(txid)}")
-              return
-          
-          if await self.is_txid_used(txid):
-              await context.bot.send_message(
-                  chat_id=chat_id,
-                  text="❌ Šis TXID jau ir izmantots. Katrs TXID var tikt izmantots tikai vienu reizi."
-              )
-              logger.debug(f"TXID already used: {txid}")
-              return
-          
-          await context.bot.send_message(chat_id=chat_id, text="🔍 Pārbaudu maksājumu... Lūdzu uzgaidi.")
-          logger.debug(f"Verifying transaction for TXID: {txid}")
-          is_valid = await self.verify_transaction(txid, user.id)
+      # Pārbauda vai TXID formāts ir pareizs
+      if len(txid) != 64:
+          await context.bot.send_message(
+              chat_id=chat_id,
+              text="❌ Nepareizs TXID formāts. TXID jābūt 64 simbolu garam."
+          )
+          logger.debug(f"Invalid TXID format: {repr(txid)}")
+          return
+      
+      if await self.is_txid_used(txid):
+          await context.bot.send_message(
+              chat_id=chat_id,
+              text="❌ Šis TXID jau ir izmantots. Katrs TXID var tikt izmantots tikai vienu reizi."
+          )
+          logger.debug(f"TXID already used: {txid}")
+          return
+      
+      await context.bot.send_message(chat_id=chat_id, text="🔍 Pārbaudu maksājumu... Lūdzu uzgaidi.")
+      logger.debug(f"Verifying transaction for TXID: {txid}")
+      is_valid = await self.verify_transaction(txid, user.id)
       
       if is_valid:
           logger.debug("Transaction is valid.")
