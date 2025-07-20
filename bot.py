@@ -4,7 +4,6 @@ import locale
 import asyncio
 import logging
 import json
-# httpx vairs netiek tieši importēts šeit, jo Supabase to pārvalda iekšēji
 
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
@@ -61,11 +60,6 @@ for handler in logging.root.handlers:
 
 logger = logging.getLogger(__name__)
 
-# Samazinām Supabase/HTTP žurnālu līmeņus
-logging.getLogger("httpx").setLevel(logging.DEBUG) # Mainīts uz DEBUG
-logging.getLogger("urllib3").setLevel(logging.WARNING)
-logging.getLogger("supabase").setLevel(logging.DEBUG) # Mainīts uz DEBUG
-
 
 class CryptoArenaBot:
   def __init__(self):
@@ -77,6 +71,7 @@ class CryptoArenaBot:
       self.wallet_address = os.getenv("WALLET_ADDRESS")
       self.supabase_url = os.getenv("SUPABASE_URL")
       self.supabase_key = os.getenv("SUPABASE_KEY")
+      self.bot_username = None # Tiks iestatīts run() funkcijā
 
       if not all([self.telegram_bot_token, self.admin_user_id is not None, self.group_id is not None, self.tronscan_api_key, self.wallet_address, self.supabase_url, self.supabase_key]):
           logger.error("Trūkst viens vai vairāki nepieciešamie vides mainīgie. Lūdzu, pārbaudiet .env failu vai servera konfigurāciju.")
@@ -109,23 +104,36 @@ class CryptoArenaBot:
       self.app.add_handler(CommandHandler("admin", self.admin_command))
       self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_txid))
       self.app.add_handler(CommandHandler("sendtx", self.sendtx_command))
-      self.app.add_handler(CallbackQueryHandler(self.handle_payment_choice)) # Jauns handler
+      # handle_payment_choice vairs netiek izmantots tieši ar callback_data, jo USDT poga tagad izmanto deep link
+      # Ja nākotnē būs citas callback_data pogas, šis handleris būs jāatjauno
+      # self.app.add_handler(CallbackQueryHandler(self.handle_payment_choice)) 
       
       logger.info("✅ Visi handleri ir reģistrēti")
 
   async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-      """Sākuma komanda ar maksājuma izvēles iespējām"""
+      """Sākuma komanda ar maksājuma izvēles iespējām vai tiešu USDT instrukciju sūtīšanu"""
       user = update.effective_user
       
+      if context.args and context.args[0] == 'pay_usdt':
+          logger.debug("✅ /start with 'pay_usdt' argument detected. Sending USDT instructions directly.")
+          await self.send_usdt_instructions(update.message.chat.id, context)
+          return
+
       welcome_text = f"""
 🎯 **KRIPTO ARĒNA PREMIUM KLUBA APMAKSA**
 
 Lūdzu, izvēlies apmaksas veidu:
 """
       
+      # Pārliecināmies, ka bot_username ir iestatīts
+      if not self.bot_username:
+          bot_info = await context.bot.get_me()
+          self.bot_username = bot_info.username
+          logger.debug(f"Bot username set to: {self.bot_username}")
+
       keyboard = InlineKeyboardMarkup([
-          [InlineKeyboardButton("Apmaksāt ar USDT", callback_data='pay_usdt')],
-          [InlineKeyboardButton("Apmaksāt ar bankas karti", url="https://t.me/tribute/app?startapp=siSVAttachment")]
+          [InlineKeyboardButton("Apmaksāt ar USDT", url=f"https://t.me/{self.bot_username}?start=pay_usdt")],
+          [InlineKeyboardButton("Apmaksāt ar bankas karti", url="https://t.me/tribute/app?startapp=siSV")]
       ])
       
       await update.message.reply_text(
@@ -135,14 +143,37 @@ Lūdzu, izvēlies apmaksas veidu:
       )
       logger.debug("✅ /start fired with payment choices!")
 
+  # handle_payment_choice funkcija vairs netiek izmantota, jo USDT poga tagad izmanto deep link
+  # Ja nākotnē būs citas callback_data pogas, šī funkcija būs jāatjauno
   async def handle_payment_choice(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-      """Apstrādā maksājuma izvēles pogas"""
+      """Apstrādā maksājuma izvēles pogas (šobrīd netiek izmantots 'pay_usdt' callback)"""
+      logger.debug(f"--- Entering handle_payment_choice ---")
       query = update.callback_query
-      await query.answer() # Atbild uz callback query, lai poga vairs nerādītu ielādi
+      logger.debug(f"Callback query received from user {query.from_user.id}. Raw data: '{query.data}'")
+      
+      try:
+          await query.answer()
+          logger.debug(f"Callback query answered successfully for '{query.data}'")
+      except Exception as e:
+          error_message_safe = str(e).encode('ascii', 'replace').decode('ascii')
+          logger.error(f"Error answering callback query for '{query.data}': {error_message_safe}")
 
+      # Šis bloks vairs netiks izpildīts 'pay_usdt' gadījumā, jo tas tagad tiek apstrādāts start_command
       if query.data == 'pay_usdt':
-          await self.send_usdt_instructions(query.message.chat.id, context)
-      logger.debug(f"✅ Payment choice handled: {query.data}")
+          logger.debug(f"Matched 'pay_usdt' callback. Proceeding to send instructions for chat ID: {query.message.chat.id}")
+          try:
+              await self.send_usdt_instructions(query.message.chat.id, context)
+              logger.debug("USDT instructions sent successfully.")
+          except Exception as e:
+              error_message_safe = str(e).encode('ascii', 'replace').decode('ascii')
+              logger.error(f"Error sending USDT instructions for chat ID {query.message.chat.id}: {error_message_safe}")
+              await context.bot.send_message(
+                  chat_id=query.message.chat.id,
+                  text="Radās kļūda, sūtot USDT instrukcijas. Lūdzu, mēģiniet vēlreiz vai sazinieties ar atbalstu."
+              )
+      else:
+          logger.warning(f"Unhandled callback data received: '{query.data}'")
+      logger.debug(f"--- Exiting handle_payment_choice for '{query.data}' ---")
 
   async def send_usdt_instructions(self, chat_id: int, context: ContextTypes.DEFAULT_TYPE):
       """Nosūta detalizētas USDT apmaksas instrukcijas"""
@@ -607,6 +638,11 @@ Komandas:
 
   async def run(self):
       """Palaiž botu"""
+      # Iegūstam bota lietotājvārdu pirms handleri tiek izsaukti
+      bot_info = await self.app.bot.get_me()
+      self.bot_username = bot_info.username
+      logger.info(f"Bot username: @{self.bot_username}")
+
       # Sāk abonementu pārbaudītāju
       asyncio.create_task(self.subscription_checker())
       
