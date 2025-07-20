@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
 import aiohttp
 from telegram import Update, User, InlineKeyboardMarkup, InlineKeyboardButton
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 from telegram.error import TelegramError
 from dotenv import load_dotenv
 from supabase import create_client, Client
@@ -109,15 +109,45 @@ class CryptoArenaBot:
       self.app.add_handler(CommandHandler("admin", self.admin_command))
       self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_txid))
       self.app.add_handler(CommandHandler("sendtx", self.sendtx_command))
+      self.app.add_handler(CallbackQueryHandler(self.handle_payment_choice)) # Jauns handler
       
       logger.info("✅ Visi handleri ir reģistrēti")
 
   async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-      """Sākuma komanda ar maksājuma instrukcijām"""
+      """Sākuma komanda ar maksājuma izvēles iespējām"""
       user = update.effective_user
       
       welcome_text = f"""
 🎯 **KRIPTO ARĒNA PREMIUM KLUBA APMAKSA**
+
+Lūdzu, izvēlies apmaksas veidu:
+"""
+      
+      keyboard = InlineKeyboardMarkup([
+          [InlineKeyboardButton("Apmaksāt ar USDT", callback_data='pay_usdt')],
+          [InlineKeyboardButton("Apmaksāt ar bankas karti", url="https://t.me/tribute/app?startapp=siSVAttachment")]
+      ])
+      
+      await update.message.reply_text(
+          welcome_text, 
+          parse_mode='Markdown',
+          reply_markup=keyboard
+      )
+      logger.debug("✅ /start fired with payment choices!")
+
+  async def handle_payment_choice(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+      """Apstrādā maksājuma izvēles pogas"""
+      query = update.callback_query
+      await query.answer() # Atbild uz callback query, lai poga vairs nerādītu ielādi
+
+      if query.data == 'pay_usdt':
+          await self.send_usdt_instructions(query.message.chat.id, context)
+      logger.debug(f"✅ Payment choice handled: {query.data}")
+
+  async def send_usdt_instructions(self, chat_id: int, context: ContextTypes.DEFAULT_TYPE):
+      """Nosūta detalizētas USDT apmaksas instrukcijas"""
+      usdt_instructions_text = f"""
+🎯 **KRIPTO ARĒNA PREMIUM KLUBA APMAKSA (USDT)**
 
 Lai pievienotos Premium klubam, tev jāveic maksājums:
 
@@ -137,17 +167,12 @@ Lai pievienotos Premium klubam, tev jāveic maksājums:
 
 Nosūti man TXID pēc maksājuma veikšanas. (Sagaidi kamēr visi bloki ir apstiprināti).
 """
-      
-      keyboard = InlineKeyboardMarkup([
-          [InlineKeyboardButton("Apmaksāt ar bankas karti", url="https://t.me/tribute/app?startapp=siSVAttachment")]
-      ])
-      
-      await update.message.reply_text(
-          welcome_text, 
-          parse_mode='Markdown',
-          reply_markup=keyboard
+      await context.bot.send_message(
+          chat_id=chat_id,
+          text=usdt_instructions_text,
+          parse_mode='Markdown'
       )
-      logger.debug("✅ /start fired!")
+      logger.debug("✅ USDT instructions sent.")
 
   async def is_txid_used(self, txid: str) -> bool:
       """Pārbauda vai TXID jau ir izmantots Supabase datubāzē"""
