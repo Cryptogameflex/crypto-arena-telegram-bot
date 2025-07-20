@@ -9,7 +9,7 @@ import json
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
 import aiohttp
-from telegram import Update, User
+from telegram import Update, User, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from telegram.error import TelegramError
 from dotenv import load_dotenv
@@ -138,9 +138,14 @@ Lai pievienotos Premium klubam, tev jāveic maksājums:
 Nosūti man TXID pēc maksājuma veikšanas. (Sagaidi kamēr visi bloki ir apstiprināti).
 """
       
+      keyboard = InlineKeyboardMarkup([
+          [InlineKeyboardButton("Apmaksāt ar bankas karti", url="https://t.me/tribute/app?startapp=siSVAttachment")]
+      ])
+      
       await update.message.reply_text(
           welcome_text, 
-          parse_mode='Markdown'
+          parse_mode='Markdown',
+          reply_markup=keyboard
       )
       logger.debug("✅ /start fired!")
 
