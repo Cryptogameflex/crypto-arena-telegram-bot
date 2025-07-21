@@ -121,7 +121,6 @@ class CryptoArenaBot:
 
       # Send the Premium Klubs image with the main title as caption
       await update.message.reply_photo(
-          chat_id=update.effective_chat.id,
           photo="https://hebbkx1anhila5yf.public.blob.vercel-storage.com/55.jpg-3bgmbJskU9V3VVxg5GKvxeaScpkixp.jpeg", # Source URL of the provided image
           caption="🎯 **KRIPTO ARĒNA PREMIUM KLUBA APMAKSA**",
           parse_mode='Markdown'
