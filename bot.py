@@ -119,14 +119,10 @@ class CryptoArenaBot:
           await self.send_usdt_instructions(update.message.chat.id, context)
           return
 
-      # Send the Premium Klubs image with the main title as caption
-      await update.message.reply_photo(
-          photo="https://hebbkx1anhila5yf.public.blob.vercel-storage.com/55.jpg-3bgmbJskU9V3VVxg5GKvxeaScpkixp.jpeg", # Source URL of the provided image
-          caption="🎯 **KRIPTO ARĒNA PREMIUM KLUBA APMAKSA**",
-          parse_mode='Markdown'
-      )
+      # Combine the main title and welcome text into a single caption
+      full_caption = f"""
+🎯 **KRIPTO ARĒNA PREMIUM KLUBA APMAKSA**
 
-      welcome_text = f"""
 Lūdzu, izvēlies apmaksas veidu:
 """
       
@@ -135,12 +131,12 @@ Lūdzu, izvēlies apmaksas veidu:
           [InlineKeyboardButton("Apmaksāt ar bankas karti", url="https://t.me/tribute/app?startapp=siSV")]
       ])
       
-      # Send the remaining text and buttons as a separate message
-      await context.bot.send_message(
-          chat_id=update.effective_chat.id,
-          text=welcome_text, 
+      # Send the image with the combined caption and the inline keyboard
+      await update.message.reply_photo(
+          photo="https://hebbkx1anhila5yf.public.blob.vercel-storage.com/55.jpg-3bgmbJskU9V3VVxg5GKvxeaScpkixp.jpeg", # Source URL of the provided image
+          caption=full_caption,
           parse_mode='Markdown',
-          reply_markup=keyboard
+          reply_markup=keyboard # Attach the keyboard directly to the photo message
       )
       logger.debug("✅ /start fired with payment choices!")
 
