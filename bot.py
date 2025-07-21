@@ -5,7 +5,7 @@ import asyncio
 import logging
 import json
 
-from datetime import datetime, timedelta, timezone # Pievienots `timezone`
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any
 import aiohttp
 from telegram import Update, User, InlineKeyboardMarkup, InlineKeyboardButton
@@ -119,26 +119,27 @@ class CryptoArenaBot:
           await self.send_usdt_instructions(update.message.chat.id, context)
           return
 
-      welcome_text = f"""
-🎯 **KRIPTO ARĒNA PREMIUM KLUBA APMAKSA**
+      # Send the Premium Klubs image with the main title as caption
+      await update.message.reply_photo(
+          chat_id=update.effective_chat.id,
+          photo="https://hebbkx1anhila5yf.public.blob.vercel-storage.com/55.jpg-3bgmbJskU9V3VVxg5GKvxeaScpkixp.jpeg", # Source URL of the provided image
+          caption="🎯 **KRIPTO ARĒNA PREMIUM KLUBA APMAKSA**",
+          parse_mode='Markdown'
+      )
 
+      welcome_text = f"""
 Lūdzu, izvēlies apmaksas veidu:
 """
       
-      # Pārliecināmies, ka bot_username ir iestatīts
-      # Šis bloks ir noņemts, jo bot_username tiek iestatīts `run` funkcijā pirms handleri tiek izsaukti.
-      # if not self.bot_username:
-      #     bot_info = await context.bot.get_me()
-      #     self.bot_username = bot_info.username
-      #     logger.debug(f"Bot username set to: {self.bot_username}")
-
       keyboard = InlineKeyboardMarkup([
           [InlineKeyboardButton("Apmaksāt ar USDT", url=f"https://t.me/{self.bot_username}?start=pay_usdt")],
           [InlineKeyboardButton("Apmaksāt ar bankas karti", url="https://t.me/tribute/app?startapp=siSV")]
       ])
       
-      await update.message.reply_text(
-          welcome_text, 
+      # Send the remaining text and buttons as a separate message
+      await context.bot.send_message(
+          chat_id=update.effective_chat.id,
+          text=welcome_text, 
           parse_mode='Markdown',
           reply_markup=keyboard
       )
